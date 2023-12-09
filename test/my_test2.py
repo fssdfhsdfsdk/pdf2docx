@@ -91,7 +91,33 @@ def check_size_and_font(configFontDc, spanFontDc, size_diff=0.1):
     except KeyError:
         return False
 
+def code_block_check(codes: str):
+    keywords = ["#include", "int", "main", "union", "struct", "char", "if", "else", "while", "sizeof", "short", "long"]
+    for key in keywords:
+        if codes.find(key) != -1:
+            return True
+    return False
+def code_block_text_handle_remove_line_number(codes: str):
+    outs = []
+    if not code_block_check(codes):
+        return codes
 
+    for line in codes.splitlines():
+        try:
+            int(line.strip())
+            continue  # 是一行数字, 丢弃
+        except ValueError:
+            pass
+
+        spans = line.strip().split()
+        try:
+            int(spans[0].strip())
+            outs.append(" ".join(spans[1:]))
+            continue
+        except ValueError:
+            pass
+        outs.append(line)
+    return "\n".join(outs)
 
 
 class BlocksWrapper:
@@ -101,41 +127,41 @@ class BlocksWrapper:
         self.blocks = blocks
         if isinstance(blocks, list):
             self.cnt = len(blocks)
-            self.b0 = blocks[0]
+            self.block0 = blocks[0]
         else:
             self.cnt = 1
-            self.b0 = blocks
+            self.block0 = blocks
         self._b0_l_cnt = None
         self._b0_l0_s_cnt = None
         self.block_idx = 0
 
     @property
-    def b0_l_cnt(self):
+    def block0_line_cnt(self):
         if self._b0_l_cnt is None:
-            lines = self.b0['lines']
+            lines = self.block0['lines']
             self._b0_l_cnt = len(lines)
             spans = lines[0]['spans']
             self._b0_l0_s_cnt = len(spans)
         return self._b0_l_cnt
 
     @property
-    def b0_l0_s_cnt(self):
+    def block0_line0_span_cnt(self):
         if self._b0_l0_s_cnt is None:
-            cnt = self.b0_l_cnt
+            cnt = self.block0_line_cnt
         return self._b0_l0_s_cnt
 
-    def check_b0_single_span(self):
+    def check_block0_single_span(self):
         """
         Ds: 检查某一个块是否只有一行, 且这一行只有一个span
         Return:
             符合, 则返回这个span的文本
             否则, 返回None, 表示不符合
         """
-        if self.b0_l_cnt == 1 and self.b0_l0_s_cnt == 1:
-            return get_block_texts(self.b0, " ")
+        if self.block0_line_cnt == 1 and self.block0_line0_span_cnt == 1:
+            return get_block_texts(self.block0, " ")
         return None
 
-    def getCurrentBlock(self, inc_idx=True):
+    def get_current_block_and_inc_cursor(self, inc_idx=True):
         idx = self.block_idx
         if idx < self.cnt:
             if inc_idx:
@@ -144,7 +170,7 @@ class BlocksWrapper:
         else:
             return None
 
-    def getNextBlock(self, inc_idx=True):
+    def get_next_block_and_inc_cursor(self, inc_idx=True):
         """
         获取游标的下一个block
         """
@@ -156,7 +182,10 @@ class BlocksWrapper:
         else:
             return None
 
-    def getCurrent_FF_Font(self):
+    def inc_cursor(self):
+        self.block_idx += 1
+
+    def get_current_0line0span_font(self):
         if self.block_idx >= self.cnt:
             return {}
         blk = self.blocks[self.block_idx]
@@ -185,6 +214,11 @@ class Book2ToMd:
         self.blockquoteCfg['normal']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['italic']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['inline-code']['size'] = self.blockquoteCfg['blockquote']['size']
+
+        if "codeHandle" in book_config.keys():
+            self.code_text_handle = globals()[book_config["codeHandle"]]
+        else:
+            self.code_text_handle = None
 
     def check_size_and_font_by_config(self, f1, keys, size_diff=0.1):
         try:
@@ -246,8 +280,7 @@ class Book2ToMd:
         """
         wp = BlocksWrapper(blocks)
         b_cnt = 0
-        f1 = wp.getCurrent_FF_Font()
-        blk = wp.getCurrentBlock()
+        blk = wp.get_current_block_and_inc_cursor()
         md_outs = []
         need_end = False
         while blk is not None:
@@ -266,10 +299,11 @@ class Book2ToMd:
                 if code_line == 0:
                     return None, 0
                 elif code_line < l_cnt:
+                    #  如果块的代码行数 小于 块的行数, 则说明下一个块与此块 代码不连续. 直接填充返回
                     self.append_md_outs(md_outs, blk, lines, code_line)
                     break
                 else:
-                    self.append_md_outs(md_outs, blk, lines, code_line, need_ends=False)
+                    self.append_md_outs(md_outs, blk, lines, code_line, need_start=False, need_ends=False)
                     need_end = True
             else:
                 if code_line < l_cnt:
@@ -277,10 +311,19 @@ class Book2ToMd:
                 else:
                     b_cnt += 1
                     self.append_md_outs(md_outs, blk, lines, code_line, need_start=False, need_ends=False)
-            f1 = wp.getCurrent_FF_Font()
-            blk = wp.getCurrentBlock()
+            blk = wp.get_current_block_and_inc_cursor()
         if need_end:
+            md_outs.insert(0, "```" + self.bookCfg['language'])
             md_outs.append("```")
+
+        if self.code_text_handle is not None:
+            if len(md_outs) >= 3:
+                new_code = self.code_text_handle("\n".join(md_outs[1:-1]))
+                md_outs = []
+                md_outs.append("```" + self.bookCfg['language'])
+                md_outs.append(new_code)
+                md_outs.append("```")
+
         if not md_outs:
             return None, 0
         else:
@@ -394,9 +437,9 @@ class Book2ToMd:
     def check_block_quote_by_keyword(self, blocks, keyword):
         wp = BlocksWrapper(blocks)
         md_outs = ["> " + keyword, "> "]
-        if wp.check_b0_single_span() == keyword:
-            next_blk = wp.getNextBlock()
-            f2 = wp.getCurrent_FF_Font()
+        if wp.check_block0_single_span() == keyword:
+            next_blk = wp.get_next_block_and_inc_cursor()
+            f2 = wp.get_current_0line0span_font()
             if not check_size_and_font(self.bookCfg['blockquote'], f2):
                 return None, 0
             if next_blk is not None:
@@ -407,14 +450,29 @@ class Book2ToMd:
     def check_block_quote_by_font(self, blocks):
         wp = BlocksWrapper(blocks)
         md_outs = []
-        f2 = wp.getCurrent_FF_Font()
+        f2 = wp.get_current_0line0span_font()
         if not check_size_and_font(self.bookCfg['blockquote'], f2):
             return None, 0
 
-        cur_blk = wp.getCurrentBlock()
-        if cur_blk is not None:
-            md_outs.append("> " + self.get_normal_blocks_str(cur_blk, self.blockquoteCfg))
-            return "\n".join(md_outs), 1
+        cur_blk = wp.get_current_block_and_inc_cursor()
+        b_cnt = 0
+        while cur_blk is not None:
+            if b_cnt == 0:
+                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, self.blockquoteCfg))
+            else:
+                md_outs.append("> ")
+                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, self.blockquoteCfg))
+            b_cnt += 1
+
+            cur_blk = wp.get_current_block_and_inc_cursor(inc_idx=False)
+            f2 = wp.get_current_0line0span_font()
+            if not check_size_and_font(self.bookCfg['blockquote'], f2):
+                cur_blk = None
+            wp.inc_cursor()
+
+        if b_cnt > 0:
+            print(b_cnt)
+            return "\n".join(md_outs), b_cnt
         return None, 0
 
     def get_normal_str_by_lines(self, nm_dc_font_dc, lines):
@@ -694,6 +752,7 @@ book1ConfigDc2 = {
 
     'codeblock': {'size': 9.08, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic']},  # 代码块
     'language': "c",  # 代码块的默认编程语言
+    'codeHandle': "code_block_text_handle_remove_line_number",  # 代码块文本处理函数
 
     'title-5': {'size': 10.0, 'flags': 20, 'font': 'Helvetica-Oblique'},
     'title-4': {'size': 11.14, 'flags': 20, 'font': 'Helvetica-Bold'},
@@ -712,4 +771,4 @@ book1ConfigDc2 = {
 
 if __name__ == "__main__":
     b1 = Book2ToMd(book1ConfigDc2)
-    b1.pages_to_md(99, 1)
+    b1.pages_to_md(102, 1)
