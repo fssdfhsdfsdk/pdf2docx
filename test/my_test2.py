@@ -814,7 +814,7 @@ book1ConfigDc2 = {
     'figure': {},
 }
 
-
+# git push origin --config 'http.proxy=socks5://127.0.0.1:10808'
 if __name__ == "__main__":
     b1 = Book2ToMd(book1ConfigDc2)
-    b1.pages_to_md(118, 1)
+    b1.pages_to_md(124, 1)
