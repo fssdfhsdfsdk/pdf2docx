@@ -205,6 +205,52 @@ class MdElement:
     def __str__(self):
         return self.text
 
+
+class CodeMixNormalBlock:
+    def __init__(self, book_config: dict):
+        self.bookCfg = book_config
+        if "codeHandle" in book_config.keys():
+            self.code_text_handle = globals()[book_config["codeHandle"]]
+        else:
+            self.code_text_handle = None
+
+        self.code_block_prefix = "```" + self.bookCfg['language']
+        self.code_block_suffix = "```"
+
+        self.md_outs = []
+        self.prefix_idx = -1
+        self.suffix_idx = -1
+
+    def append_outs(self, line):
+        self.md_outs.append(line)
+
+    def set_header_prefix(self):
+        self.prefix_idx = len(self.md_outs)
+        self.md_outs.append(self.code_block_prefix)
+
+    def set_end_suffix(self):
+        self.suffix_idx = len(self.md_outs)
+        self.md_outs.append(self.code_block_suffix)
+
+    @property
+    def codeblock(self):
+        normal_code = "\n".join(self.md_outs[self.prefix_idx+1:self.suffix_idx])
+        if self.code_text_handle is not None:
+            return self.code_text_handle(normal_code)
+        else:
+            return normal_code
+
+    def __str__(self):
+        outs = []
+        if self.suffix_idx <= self.prefix_idx:
+            return "\n".join(self.md_outs)
+        outs.extend(self.md_outs[0:self.prefix_idx+1])
+        outs.append(self.codeblock)
+        outs.extend(self.md_outs[self.suffix_idx:])
+
+        return "\n".join(outs)
+
+
 class Book2ToMd:
 
     def __init__(self, book_config: dict):
@@ -215,29 +261,10 @@ class Book2ToMd:
         self.blockquoteCfg['italic']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['inline-code']['size'] = self.blockquoteCfg['blockquote']['size']
 
-        if "codeHandle" in book_config.keys():
-            self.code_text_handle = globals()[book_config["codeHandle"]]
-        else:
-            self.code_text_handle = None
+
 
     def check_size_and_font_by_config(self, f1, keys, size_diff=0.1):
-        try:
-            f_cfg = self.bookCfg[keys]
-            font = f_cfg['font']
-            if isinstance(font, list):
-                if f1['font'] in font:
-                    if abs(f1['size'] - f_cfg['size']) < size_diff:
-                        return True
-                    else:
-                        return False
-            else:
-                if f1['font'] == font:
-                    if abs(f1['size'] - f_cfg['size']) < size_diff:
-                        return True
-                    else:
-                        return False
-        except KeyError:
-            return False
+        return check_size_and_font(self.bookCfg[keys], f1, size_diff)
 
     def check_is_code_blocks(self, block):
         flag = False
@@ -249,21 +276,26 @@ class Book2ToMd:
                 code_line += 1
         return flag, code_line
 
-    def append_md_outs(self, md_outs, blk, lines, code_line, need_start=True, need_ends=True):
+    def append_outs_mixed_noraml_and_codeblock(self, cn_block: CodeMixNormalBlock, blk, lines, cline_start, cline_cnt,
+                                               need_start=True, need_ends=True):
         if lines == 1:
-            md_outs.append("`" + get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=code_line) + "`")
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[code_line:])
+            cn_block.append_outs("`" + get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=cline_cnt) + "`")
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_cnt:])
             if str_out != '':
-                md_outs.append(str_out)
+                cn_block.append_outs(str_out)
         else:
-            if need_start:
-                md_outs.append("```" + self.bookCfg['language'])
-            md_outs.append(get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=code_line))
-            if need_ends:
-                md_outs.append("```")
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[code_line:])
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[0:cline_start])
             if str_out != '':
-                md_outs.append(str_out)
+                cn_block.append_outs(str_out)
+
+            if need_start:
+                cn_block.set_header_prefix()
+            cn_block.append_outs(get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=cline_start, line_limit=cline_cnt))
+            if need_ends:
+                cn_block.set_end_suffix()
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_start + cline_cnt:])
+            if str_out != '':
+                cn_block.append_outs(str_out)
 
     def check_code_blocks(self, blocks, code_one_span=False):
         """
@@ -281,53 +313,63 @@ class Book2ToMd:
         wp = BlocksWrapper(blocks)
         b_cnt = 0
         blk = wp.get_current_block_and_inc_cursor()
-        md_outs = []
-        need_end = False
+
+        code_mixed = CodeMixNormalBlock(self.bookCfg)
         while blk is not None:
             code_line = 0
             lines = blk['lines']
             l_cnt = len(lines)
-            for line in lines:
+            cline_start = -1
+            for j in range(l_cnt):
+                line = lines[j]
                 spans = line['spans']
                 if code_one_span and len(spans) != 1:
                     break
 
                 if self.check_size_and_font_by_config(spans[0], 'codeblock'):
                     code_line += 1
+                    if cline_start == -1:
+                        cline_start = j
+            # if code_line > 0:
+            #     print("code lines: ", code_line, ", start line: ", cline_start, ", line_cnt: ", l_cnt)
+
             if b_cnt == 0:
                 b_cnt += 1
                 if code_line == 0:
                     return None, 0
-                elif code_line < l_cnt:
+                elif code_line < l_cnt and cline_start == 0:
                     #  如果块的代码行数 小于 块的行数, 则说明下一个块与此块 代码不连续. 直接填充返回
-                    self.append_md_outs(md_outs, blk, lines, code_line)
+                    self.append_outs_mixed_noraml_and_codeblock(code_mixed, blk, lines, cline_start, code_line)
                     break
                 else:
-                    self.append_md_outs(md_outs, blk, lines, code_line, need_start=False, need_ends=False)
-                    need_end = True
+                    self.append_outs_mixed_noraml_and_codeblock(code_mixed, blk, lines, cline_start,
+                                                                code_line, need_start=True, need_ends=False)
             else:
-                if code_line < l_cnt:
+                if code_line == 0:
+                    break
+                elif code_line < l_cnt and cline_start == 0:
+                    self.append_outs_mixed_noraml_and_codeblock(code_mixed, blk, lines, cline_start,
+                                                                code_line, need_start=False, need_ends=True)
                     break
                 else:
                     b_cnt += 1
-                    self.append_md_outs(md_outs, blk, lines, code_line, need_start=False, need_ends=False)
+                    self.append_outs_mixed_noraml_and_codeblock(code_mixed, blk, lines, cline_start,
+                                                                code_line, need_start=False, need_ends=False)
             blk = wp.get_current_block_and_inc_cursor()
-        if need_end:
-            md_outs.insert(0, "```" + self.bookCfg['language'])
-            md_outs.append("```")
+        if code_mixed.prefix_idx != -1 and code_mixed.suffix_idx == -1:
+            code_mixed.set_end_suffix()
 
-        if self.code_text_handle is not None:
-            if len(md_outs) >= 3:
-                new_code = self.code_text_handle("\n".join(md_outs[1:-1]))
-                md_outs = []
-                md_outs.append("```" + self.bookCfg['language'])
-                md_outs.append(new_code)
-                md_outs.append("```")
+        return str(code_mixed), b_cnt
 
-        if not md_outs:
-            return None, 0
+    def getMdTitlePrefixBySpan(self, span):
+        if self.check_size_and_font_by_config(span, 'title-3'):
+            return "### "
+        elif self.check_size_and_font_by_config(span, 'title-4'):
+            return "#### "
+        elif self.check_size_and_font_by_config(span, 'title-5'):
+            return "##### "
         else:
-            return "\n".join(md_outs), b_cnt
+            return ""
 
     def check_title_blocks(self, block):
         """
@@ -336,22 +378,24 @@ class Book2ToMd:
         """
         lines = block['lines']
         l_cnt = len(lines)
-        if l_cnt == 1 or l_cnt == 2:
+
+        if l_cnt < 3:
             s1 = lines[0]['spans'][0]
+            lv_prefix = self.getMdTitlePrefixBySpan(s1)
+            if lv_prefix == "":
+                return None
+
             if l_cnt == 2:
                 s2 = lines[1]['spans'][0]
-                if s1['font'] != s2['font']:
+                if self.getMdTitlePrefixBySpan(s2) == "":
                     return None
 
-            if self.check_size_and_font_by_config(s1, 'title-3'):
-                return "### " + get_lines_texts(lines)
-            elif self.check_size_and_font_by_config(s1, 'title-4'):
-                return "#### " + get_lines_texts(lines)
-            elif self.check_size_and_font_by_config(s1, 'title-5'):
-                return "##### " + get_lines_texts(lines)
-            else:
-                # print("not handle this size line: %s" % str(s1))
-                return None
+            if l_cnt == 3:
+                s2 = lines[2]['spans'][0]
+                if self.getMdTitlePrefixBySpan(s2) == "":
+                    return None
+
+            return lv_prefix + get_lines_texts(lines)
         else:
             return None
 
@@ -423,7 +467,7 @@ class Book2ToMd:
                             return get_lines_texts(lines) + " " + get_block_texts(next_blk, " "), 2
                     else:
                         if flag == TYPE_FIGURE:
-                            return get_lines_texts(lines) + "\n\n```\n\n\n\n\n```", 1
+                            return get_lines_texts(lines) + "\n\n```\n\n```", 1
                         else:
                             return get_lines_texts(lines), 1
         return None, 0
@@ -471,7 +515,7 @@ class Book2ToMd:
             wp.inc_cursor()
 
         if b_cnt > 0:
-            print(b_cnt)
+            print("block quote cnt:", b_cnt)
             return "\n".join(md_outs), b_cnt
         return None, 0
 
@@ -520,6 +564,7 @@ class Book2ToMd:
             nm_dc_font_dc = self.bookCfg
         return self.get_normal_str_by_lines(nm_dc_font_dc, lines)
 
+    @DeprecationWarning
     def get_table_str_by_blocks(self, blocks):
         table_line_cnt = 1
         table_outs = []
@@ -747,16 +792,17 @@ book1ConfigDc2 = {
     'path': r"H:\pdf\CS计算机\网络\UNIX Network Programming, Volume 1 The Sockets Networking API, 3rd Edition (W. Richard Stevens, Bill Fenner etc.) (z-lib.org).pdf",
 
     'normal': {'size': [11.14, 10.03], 'flags': 4, 'font': ['Palatino-Roman']},  # 正文 格式
-    'italic': {'size': 11.14, 'flags': 6, 'font': ['Palatino-Italic', 'Courier-Bold']},  # 正文 斜体字格式 ==> md加粗 *xxx*
-    'inline-code': {'size': 11.14, 'flags': 4, 'font': 'Courier'},  # 正文 内联代码块  ==>  `xxx`
+    'italic': {'size': [11.14, 10.03, 7.8], 'flags': 6, 'font': ['Palatino-Italic', 'Palatino-Bold',
+                                                                 'Courier-Bold', 'Courier-Oblique']},  # 正文 斜体字格式 ==> md加粗 *xxx*
+    'inline-code': {'size': [11.14], 'flags': 4, 'font': 'Courier'},  # 正文 内联代码块  ==>  `xxx`
 
-    'codeblock': {'size': 9.08, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic']},  # 代码块
+    'codeblock': {'size': 9.08, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic', 'Palatino-Roman']},  # 代码块
     'language': "c",  # 代码块的默认编程语言
     'codeHandle': "code_block_text_handle_remove_line_number",  # 代码块文本处理函数
 
     'title-5': {'size': 10.0, 'flags': 20, 'font': 'Helvetica-Oblique'},
     'title-4': {'size': 11.14, 'flags': 20, 'font': 'Helvetica-Bold'},
-    'title-3': {'size': 13.37, 'flags': 20, 'font': 'Helvetica-Bold'},  # md 3级标题
+    'title-3': {'size': 13.37, 'flags': 20, 'font': ['Helvetica-Bold', 'Courier-Bold']},  # md 3级标题
     'chapter': {},  # 章节名 ===> md 2级标题(不支持)
 
     'blockquote': {'size': 8.9, 'flags': 4, 'font': 'Palatino-Roman'},  # md的 > xxxx 的块引用格式
@@ -771,4 +817,4 @@ book1ConfigDc2 = {
 
 if __name__ == "__main__":
     b1 = Book2ToMd(book1ConfigDc2)
-    b1.pages_to_md(102, 1)
+    b1.pages_to_md(118, 1)
