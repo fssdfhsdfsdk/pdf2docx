@@ -6,9 +6,16 @@ from pprint import pprint
 import math
 import re
 import pyperclip
+from enum import Enum
 
 TYPE_FIGURE = 1
 TYPE_TABLE = 2
+
+class MdType(Enum):
+    NORMAL = 1
+    BLOCK_QUOTE = 2
+    CODE_BLOCK = 3
+    MIXED_NORMAL_CBLK = 4
 
 def get_line_texts(line):
     outs = []
@@ -78,7 +85,11 @@ def check_sizes(configSzs, spanSz, size_diff):
         else:
             return False
 
-def check_size_and_font(configFontDc, spanFontDc, size_diff=0.1):
+def check_size_and_font_by_mixed_config(configFontDc: dict, spanFontDc, size_diff=0.1):
+    """
+    参数:
+      configFontDc: font与size可以是单个值, 也可以是list多个值, 任意组合
+    """
     try:
         font = configFontDc['font']
         szs = configFontDc['size']
@@ -91,8 +102,19 @@ def check_size_and_font(configFontDc, spanFontDc, size_diff=0.1):
     except KeyError:
         return False
 
+
+def check_size_and_font(configFontDc: dict|list, spanFontDc, size_diff=0.1):
+    if isinstance(configFontDc, list):
+        for cfg in configFontDc:
+            ret = check_size_and_font_by_mixed_config(cfg, spanFontDc, size_diff)
+            if ret:
+                return ret
+        return False
+    else:
+        return check_size_and_font_by_mixed_config(configFontDc, spanFontDc, size_diff)
+
 def code_block_check(codes: str):
-    keywords = ["#include", "int", "main", "union", "struct", "char", "if", "else", "while", "sizeof", "short", "long"]
+    keywords = ["#include", "int", "main", "union", "struct", "char", "if", "else", "while", "sizeof", "short", "long", "void"]
     for key in keywords:
         if codes.find(key) != -1:
             return True
@@ -160,6 +182,18 @@ class BlocksWrapper:
         if self.block0_line_cnt == 1 and self.block0_line0_span_cnt == 1:
             return get_block_texts(self.block0, " ")
         return None
+
+    def check_book3_one_line_first_two_span(self):
+        if self.block0_line0_span_cnt > 2:
+            line_0 = self.block0['lines'][0]
+            s0 = line_0['spans'][0]
+            s1 = line_0['spans'][1]
+            if s0['text'] == 'T' and s1['text'] == 'IP':
+                return True
+            elif s0['text'] == 'A' and s1['text'] == 'SIDE':
+                return True
+        return False
+
 
     def get_current_block_and_inc_cursor(self, inc_idx=True):
         idx = self.block_idx
@@ -251,13 +285,35 @@ class CodeMixNormalBlock:
         return "\n".join(outs)
 
 
+class PdfMdFontMapper:
+
+    def __init__(self, book_config: dict):
+        self.bookCfg = book_config
+        pass
+
+    def font(self, key: str):
+        try:
+            return self.bookCfg[key]
+        except KeyError:
+            return {}
+
+    def italic_font(self):
+        return self.font("real-italic")
+
+
 class Book2ToMd:
 
     def __init__(self, book_config: dict):
         self.bookCfg = book_config
+        self.fontMapper = PdfMdFontMapper(book_config)
+
         self.docs = fitz.open(self.bookCfg['path'])  # open a document
         self.blockquoteCfg = copy.deepcopy(book_config)  # 必须深度copy, 不然有嵌套dict还是会有问题
-        self.blockquoteCfg['normal']['size'] = self.blockquoteCfg['blockquote']['size']
+        if isinstance(self.blockquoteCfg['normal'], list):
+            for cfg in self.blockquoteCfg['normal']:
+                cfg['size'] = self.blockquoteCfg['blockquote']['size']
+        else:
+            self.blockquoteCfg['normal']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['italic']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['inline-code']['size'] = self.blockquoteCfg['blockquote']['size']
 
@@ -280,11 +336,11 @@ class Book2ToMd:
                                                need_start=True, need_ends=True):
         if lines == 1:
             cn_block.append_outs("`" + get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=cline_cnt) + "`")
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_cnt:])
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_cnt:], MdType.MIXED_NORMAL_CBLK)
             if str_out != '':
                 cn_block.append_outs(str_out)
         else:
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[0:cline_start])
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[0:cline_start], MdType.MIXED_NORMAL_CBLK)
             if str_out != '':
                 cn_block.append_outs(str_out)
 
@@ -293,7 +349,7 @@ class Book2ToMd:
             cn_block.append_outs(get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=cline_start, line_limit=cline_cnt))
             if need_ends:
                 cn_block.set_end_suffix()
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_start + cline_cnt:])
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_start + cline_cnt:], MdType.MIXED_NORMAL_CBLK)
             if str_out != '':
                 cn_block.append_outs(str_out)
 
@@ -301,6 +357,8 @@ class Book2ToMd:
         """
         参数:
          code_one_span: True限制代码行, 只能有一个span
+        bug记录：
+          一个block: 开头是code + normal + code line  + normal
         场景:
          第一个block:
            1、全是代码
@@ -348,6 +406,7 @@ class Book2ToMd:
                 if code_line == 0:
                     break
                 elif code_line < l_cnt and cline_start == 0:
+                    b_cnt += 1
                     self.append_outs_mixed_noraml_and_codeblock(code_mixed, blk, lines, cline_start,
                                                                 code_line, need_start=False, need_ends=True)
                     break
@@ -491,21 +550,26 @@ class Book2ToMd:
                 return "\n".join(md_outs), 2
         return None, 0
 
-    def check_block_quote_by_font(self, blocks):
+    def check_block_quote_by_font(self, blocks, check_type="font"):
         wp = BlocksWrapper(blocks)
         md_outs = []
         f2 = wp.get_current_0line0span_font()
-        if not check_size_and_font(self.bookCfg['blockquote'], f2):
-            return None, 0
+
+        if check_type == "font":
+            if not check_size_and_font(self.bookCfg['blockquote'], f2, size_diff=0.01):
+                return None, 0
+        elif check_type == "book3":
+            if not wp.check_book3_one_line_first_two_span():
+                return None, 0
 
         cur_blk = wp.get_current_block_and_inc_cursor()
         b_cnt = 0
         while cur_blk is not None:
             if b_cnt == 0:
-                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, self.blockquoteCfg))
+                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, MdType.BLOCK_QUOTE, self.blockquoteCfg))
             else:
                 md_outs.append("> ")
-                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, self.blockquoteCfg))
+                md_outs.append("> " + self.get_normal_blocks_str(cur_blk, MdType.BLOCK_QUOTE, self.blockquoteCfg))
             b_cnt += 1
 
             cur_blk = wp.get_current_block_and_inc_cursor(inc_idx=False)
@@ -519,7 +583,7 @@ class Book2ToMd:
             return "\n".join(md_outs), b_cnt
         return None, 0
 
-    def get_normal_str_by_lines(self, nm_dc_font_dc, lines):
+    def get_normal_str_by_lines(self, nm_dc_font_dc, lines, blk_type: MdType):
         mdstr_outs = []
 
         pre_line_end_str = None
@@ -550,19 +614,21 @@ class Book2ToMd:
                     mdstr_outs.append("`" + str(span['text']) + '`')
                 elif check_size_and_font(nm_dc_font_dc['italic'], span):
                     mdstr_outs.append("**" + str(span['text']).strip() + '**')
+                elif check_size_and_font(self.fontMapper.italic_font(), span):
+                    mdstr_outs.append("*" + str(span['text']).strip() + '*')
                 else:
-                    print("one line [ %s ]" % get_line_texts(line))
+                    print("type: %s,line[ %s ]" % (str(blk_type), get_line_texts(line)))
                     try:
-                        print("not support type span: %s" % str(span))
+                        print("    not support type span: %s" % str(span))
                     except TypeError as e:
                         raise e
         return " ".join(mdstr_outs)
 
-    def get_normal_blocks_str(self, block, nm_dc_font_dc=None):
+    def get_normal_blocks_str(self, block, blk_type: MdType, nm_dc_font_dc=None):
         lines = block['lines']
         if nm_dc_font_dc is None:
             nm_dc_font_dc = self.bookCfg
-        return self.get_normal_str_by_lines(nm_dc_font_dc, lines)
+        return self.get_normal_str_by_lines(nm_dc_font_dc, lines, blk_type)
 
     @DeprecationWarning
     def get_table_str_by_blocks(self, blocks):
@@ -656,11 +722,21 @@ class Book2ToMd:
                 out_blocks.append(block)
         return out_blocks
 
+    def split_block(self, block):
+        """
+        现象：有的pdf其段落之间比较紧密, 仅仅依靠首行缩进区分，而mupdf将多个这样的段落识别为一个block
+        """
+        pass
+
     def configOfBlockQueto(self):
         if 'blockquote-type' not in self.bookCfg.keys():
             return "keyword"
         else:
-            return "font"
+            val = self.bookCfg['blockquote-type']
+            if val == "" or val.isspace():
+                return "font"
+            else:
+                return val
 
     def pages_to_md(self, index_s, count=1):
         page_outs = []
@@ -681,6 +757,7 @@ class Book2ToMd:
                 table_md_str = self.tableListList2Md(tb_ll, tb.row_count, tb.col_count)
                 blocks = self.filter_blocks_by_bbox(blocks, tb.bbox)
                 md_elements.append(MdElement(table_md_str, tb.bbox))
+
 
             block_cnt = len(blocks)
             i = 0
@@ -703,7 +780,7 @@ class Book2ToMd:
                 if self.configOfBlockQueto() == "keyword":
                     ret, tmp_b_cnt = self.check_block_quote_by_keyword(blocks[i:], keyword="Note")
                 else:
-                    ret, tmp_b_cnt = self.check_block_quote_by_font(blocks[i:])
+                    ret, tmp_b_cnt = self.check_block_quote_by_font(blocks[i:], self.configOfBlockQueto())
                 if ret is not None:
                     md_elements.append(MdElement(ret, bbox))
                     i += tmp_b_cnt
@@ -745,7 +822,7 @@ class Book2ToMd:
                         i += 1
                         continue
 
-                md_str = self.get_normal_blocks_str(blk)
+                md_str = self.get_normal_blocks_str(blk, MdType.NORMAL)
                 if md_str is not None and len(md_str) > 0:
                     md_elements.append(MdElement(md_str, bbox))
                 i += 1
@@ -792,7 +869,7 @@ book1ConfigDc2 = {
     'path': r"H:\pdf\CS计算机\网络\UNIX Network Programming, Volume 1 The Sockets Networking API, 3rd Edition (W. Richard Stevens, Bill Fenner etc.) (z-lib.org).pdf",
 
     'normal': {'size': [11.14, 10.03], 'flags': 4, 'font': ['Palatino-Roman']},  # 正文 格式
-    'italic': {'size': [11.14, 10.03, 7.8], 'flags': 6, 'font': ['Palatino-Italic', 'Palatino-Bold',
+    'italic': {'size': [11.14, 10.03, 7.8], 'flags': 6, 'font': ['Palatino-Italic', 'Palatino-Bold', 'Helvetica-Bold',
                                                                  'Courier-Bold', 'Courier-Oblique']},  # 正文 斜体字格式 ==> md加粗 *xxx*
     'inline-code': {'size': [11.14], 'flags': 4, 'font': 'Courier'},  # 正文 内联代码块  ==>  `xxx`
 
@@ -805,7 +882,7 @@ book1ConfigDc2 = {
     'title-3': {'size': 13.37, 'flags': 20, 'font': ['Helvetica-Bold', 'Courier-Bold']},  # md 3级标题
     'chapter': {},  # 章节名 ===> md 2级标题(不支持)
 
-    'blockquote': {'size': 8.9, 'flags': 4, 'font': 'Palatino-Roman'},  # md的 > xxxx 的块引用格式
+    'blockquote': {'size': [8.9, 8.91], 'flags': 4, 'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic']},  # md的 > xxxx 的块引用格式
     'blockquote-type': "",   # 默认关键词触发
 
     # 第一个为{}, 则要填后面2个, 否则2个格式相同 都用第一个
@@ -814,7 +891,44 @@ book1ConfigDc2 = {
     'figure': {},
 }
 
+book1ConfigDc3 = {
+    'header_block_cnt': 1,  # 页眉 块数 跳过
+    'footer_block_cnt': 1,  # 页脚 块数 跳过
+    'path': r"F:\pdf\CS计算机\操作系统\Operating Systems Three Easy Pieces by Remzi H. Arpaci-Dusseau, Andrea C. Arpaci-Dusseau (z-lib.org).pdf",
+
+    'normal': [
+            {'size': [8.96, 7.17], 'flags': 4, 'font': ['NimbusSanL-Regu', 'URWPalladioL-Roma', 'CMMI9', 'CMSY9', 'CMR9']},
+            {'size': 5.9775800704956055, 'flags': 4, 'font': ['CMMI6', 'CMR6']}
+        ],  # 正文 格式
+    'italic': {'size': [8.96], 'flags': 6, 'font': ['URWPalladioL-Bold', 'NimbusMonL-Bold']},  # 正文 斜体字格式 ==> md加粗 **xxx**
+    'inline-code': {'size': [8.96], 'flags': 4, 'font': 'NimbusMonL-Regu'},  # 正文 内联代码块  ==>  `xxx`
+    'real-italic': {'size': 8.96638011932373, 'flags': 4, 'font': 'URWPalladioL-Ital'},  # 正文: 期望的斜体字格式 ===> md斜体字 *xxx*
+
+    'codeblock': [{'size': 6.97, 'flags': 20, 'font': 'NimbusMonL-Regu'},
+                  {'size': 4.981319904327393, 'flags': 4, 'font': 'URWPalladioL-Roma'}
+                  ],  # 代码块
+    'language': "c",  # 代码块的默认编程语言
+    'codeHandle': "code_block_text_handle_remove_line_number",  # 代码块文本处理函数
+
+    'title-5': {'size': 10.0, 'flags': 20, 'font': 'Helvetica-Oblique'},
+    'title-4': {'size': 9.962639808654785, 'flags': 20, 'font': 'URWPalladioL-Bold'},
+    'title-3': {'size': 10.9, 'flags': 20, 'font': ['URWPalladioL-Roma']},  # md 3级标题
+    'chapter': {},  # 章节名 ===> md 2级标题(不支持)
+
+    'blockquote': {'size': [8.96, 8.91, 7.173, 7.97], 'flags': 4, 'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic',
+                                                                   'URWPalladioL-Roma']},  # md的 > xxxx 的块引用格式
+    'blockquote-type': "book3",   # 不存在则, 默认关键词触发; 否则空字符表示 font触发，或者其他特定触发（字体无法判断）
+
+    # 第一个为{}, 则要填后面2个, 否则2个格式相同 都用第一个
+    'table_or_figure': {'size': 8.91, 'flags': 20, 'font': 'Palatino-Bold'},
+    'table': {},
+    'figure': {},
+}
+
+
 # ALL_PROXY=socks5://127.0.0.1:10808 git push origin
 if __name__ == "__main__":
-    b1 = Book2ToMd(book1ConfigDc2)
-    b1.pages_to_md(124, 1)
+    # b1 = Book2ToMd(book1ConfigDc2)
+    # b1.pages_to_md(158, 1)
+    b1 = Book2ToMd(book1ConfigDc3)
+    b1.pages_to_md(424, 1)
