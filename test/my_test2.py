@@ -722,11 +722,67 @@ class Book2ToMd:
                 out_blocks.append(block)
         return out_blocks
 
-    def split_block(self, block):
+    def set_bbox_xy0(self, element, point):
+        x0, y0, x1, y1 = element['bbox']
+        x, y = point
+        element['bbox'] = x, y, x1, y1
+
+    def set_bbox_xy1(self, element, point):
+        x0, y0, x1, y1 = element['bbox']
+        x, y = point
+        element['bbox'] = x0, y0, x, y
+
+    def split_block(self, blk):
         """
         现象：有的pdf其段落之间比较紧密, 仅仅依靠首行缩进区分，而mupdf将多个这样的段落识别为一个block
         """
-        pass
+        x0, y0, x1, y1 = blk['bbox']
+        new_blks = []
+        lines = blk['lines']
+        line_cnt = len(lines)
+
+        if line_cnt < 5:
+            return None
+
+        i = 0 # 第1、2行跳过
+        init_block = {'bbox': (0, 0, 0, 0), 'lines': [], 'split': True}
+        loop_block = copy.deepcopy(init_block)
+        while i < line_cnt:
+            cur_line = lines[i]
+            x10, y10, x11, y11 = cur_line['bbox']
+            if i == 0:
+                self.set_bbox_xy0(loop_block, (x10, y10))
+                loop_block['lines'].append(cur_line)
+                i += 1
+                continue
+            pre_line = lines[i-1]
+            x20, y20, x21, y21 = pre_line['bbox']
+
+            if i == line_cnt - 1:
+                if abs(x20 - x10) > 10:
+                    self.set_bbox_xy1(loop_block, (x21, y21))
+                    new_blks.append(loop_block)
+                    new_blks.append({'bbox': cur_line['bbox'], 'lines': [cur_line], 'split': True})
+                else:
+                    loop_block['lines'].append(cur_line)
+                    self.set_bbox_xy1(loop_block, (x11, y11))
+                    new_blks.append(loop_block)
+                i += 1
+            else:
+                nxt_line = lines[i + 1]
+                x30, y30, x31, y31 = nxt_line['bbox']
+                if abs(x30 - x20) < 2 and abs(x20 - x10) > 10:
+                    self.set_bbox_xy1(loop_block, (x21, y21))
+                    new_blks.append(loop_block)
+                    loop_block = copy.deepcopy(init_block)
+                    self.set_bbox_xy0(loop_block, (x10, y10))
+                    loop_block['lines'].append(cur_line)
+                else:
+                    loop_block['lines'].append(cur_line)
+                i += 1
+
+        return new_blks
+
 
     def configOfBlockQueto(self):
         if 'blockquote-type' not in self.bookCfg.keys():
@@ -759,9 +815,9 @@ class Book2ToMd:
                 md_elements.append(MdElement(table_md_str, tb.bbox))
 
 
-            block_cnt = len(blocks)
             i = 0
-            while i < block_cnt:
+            while i < len(blocks):
+                block_cnt = len(blocks)
                 if i < self.bookCfg['header_block_cnt']:
                     i += 1
                     continue
@@ -820,6 +876,15 @@ class Book2ToMd:
                         for line in blk['lines']:
                             next_blk['lines'].insert(0, line)
                         i += 1
+                        continue
+
+                if 'split' not in blk.keys():
+                    split_blks = self.split_block(blk)
+                    if split_blks is not None:
+                        blocks = blocks[0:i] + blocks[i+1:]
+                        split_blks.reverse()
+                        for sblk in split_blks:
+                            blocks.insert(i, sblk)
                         continue
 
                 md_str = self.get_normal_blocks_str(blk, MdType.NORMAL)
@@ -931,4 +996,4 @@ if __name__ == "__main__":
     # b1 = Book2ToMd(book1ConfigDc2)
     # b1.pages_to_md(158, 1)
     b1 = Book2ToMd(book1ConfigDc3)
-    b1.pages_to_md(424, 1)
+    b1.pages_to_md(450, 1)
