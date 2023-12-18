@@ -11,11 +11,13 @@ from enum import Enum
 TYPE_FIGURE = 1
 TYPE_TABLE = 2
 
+
 class MdType(Enum):
     NORMAL = 1
     BLOCK_QUOTE = 2
     CODE_BLOCK = 3
     MIXED_NORMAL_CBLK = 4
+
 
 def get_line_texts(line):
     outs = []
@@ -32,7 +34,60 @@ def get_lines_texts(lines, spl: str = " "):
     return spl.join(outs)
 
 
-def get_block_texts(block, span_spl: str, line_spl: str=None, start_line=None, line_limit=None):
+def set_bbox_xy0(element, point):
+    x0, y0, x1, y1 = element['bbox']
+    x, y = point
+    element['bbox'] = x, y, x1, y1
+
+
+def set_bbox_xy1(element, point):
+    x0, y0, x1, y1 = element['bbox']
+    x, y = point
+    element['bbox'] = x0, y0, x, y
+
+
+def merge_two_line(line1, line2, spaces=" "):
+    x0, y0, x1, y1 = line2['bbox']
+    spans = line1['spans']
+    span0 = spans[0]
+    space_span = copy.deepcopy(span0)
+    space_span['text'] = spaces
+    line1['spans'].append(space_span)
+
+    for span in line2['spans']:
+        line1['spans'].append(span)
+    set_bbox_xy1(line1, (x1, y1))
+
+
+def merge_multi_line_to_one_line(lines: list):
+    output_lines = []
+    line_cnt = len(lines)
+    assert line_cnt > 1
+    first_line = lines[0]
+    x0, y0, x1, y1 = first_line['bbox']
+    i = 1
+    merge_line_pre_x1 = x1
+    while i < line_cnt:
+        tmp_line = lines[i]
+        x10, y10, x11, y11 = tmp_line['bbox']
+        if abs(y10 - y0) < 1.2 and abs(y11 - y1) < 1.1:
+            if x10 - x1 > 10:
+                x_diff = int((x10 - merge_line_pre_x1) / 7)
+                merge_two_line(first_line, tmp_line, x_diff * " ")
+            else:
+                merge_two_line(first_line, tmp_line)
+            merge_line_pre_x1 = x11
+        else:
+            output_lines.append(first_line)
+            first_line = tmp_line
+            x0, y0, x1, y1 = tmp_line['bbox']
+            merge_line_pre_x1 = x1
+        i += 1
+    output_lines.append(first_line)
+    return output_lines
+
+
+def get_block_texts(block, span_spl: str, line_spl: str = None, start_line=None, line_limit=None, is_merge_line=False):
     """
     start_line: 初始行号
     line_limit： 总数量
@@ -43,6 +98,7 @@ def get_block_texts(block, span_spl: str, line_spl: str=None, start_line=None, l
     lines = block['lines']
     cnt = len(lines)
 
+    output_lines = []
     num = 0
     while start_line < cnt:
         num += 1
@@ -50,6 +106,13 @@ def get_block_texts(block, span_spl: str, line_spl: str=None, start_line=None, l
             if num > line_limit:
                 break
         line = lines[start_line]
+        output_lines.append(line)
+        start_line += 1
+
+    if is_merge_line:
+        output_lines = merge_multi_line_to_one_line(output_lines)
+
+    for line in output_lines:
         if line_spl is not None:
             line_outs = []
             for span in line['spans']:
@@ -58,7 +121,7 @@ def get_block_texts(block, span_spl: str, line_spl: str=None, start_line=None, l
         else:
             for span in line['spans']:
                 outs.append(span['text'])
-        start_line += 1
+
     if line_spl is not None:
         return line_spl.join(outs)
     else:
@@ -85,6 +148,7 @@ def check_sizes(configSzs, spanSz, size_diff):
         else:
             return False
 
+
 def check_size_and_font_by_mixed_config(configFontDc: dict, spanFontDc, size_diff=0.1):
     """
     参数:
@@ -103,7 +167,7 @@ def check_size_and_font_by_mixed_config(configFontDc: dict, spanFontDc, size_dif
         return False
 
 
-def check_size_and_font(configFontDc: dict|list, spanFontDc, size_diff=0.1):
+def check_size_and_font(configFontDc: dict | list, spanFontDc, size_diff=0.1):
     if isinstance(configFontDc, list):
         for cfg in configFontDc:
             ret = check_size_and_font_by_mixed_config(cfg, spanFontDc, size_diff)
@@ -113,12 +177,16 @@ def check_size_and_font(configFontDc: dict|list, spanFontDc, size_diff=0.1):
     else:
         return check_size_and_font_by_mixed_config(configFontDc, spanFontDc, size_diff)
 
+
 def code_block_check(codes: str):
-    keywords = ["#include", "int", "main", "union", "struct", "char", "if", "else", "while", "sizeof", "short", "long", "void"]
+    keywords = ["#include", "int", "main", "union", "struct", "char", "if", "else", "while", "sizeof", "short", "long",
+                "void"]
     for key in keywords:
         if codes.find(key) != -1:
             return True
     return False
+
+
 def code_block_text_handle_remove_line_number(codes: str):
     outs = []
     if not code_block_check(codes):
@@ -194,7 +262,6 @@ class BlocksWrapper:
                 return True
         return False
 
-
     def get_current_block_and_inc_cursor(self, inc_idx=True):
         idx = self.block_idx
         if idx < self.cnt:
@@ -225,6 +292,7 @@ class BlocksWrapper:
         blk = self.blocks[self.block_idx]
         s0 = blk['lines'][0]['spans'][0]
         return {'size': s0['size'], 'font': s0['font']}
+
 
 class MdElement:
     def __init__(self, text, bbox):
@@ -268,7 +336,7 @@ class CodeMixNormalBlock:
 
     @property
     def codeblock(self):
-        normal_code = "\n".join(self.md_outs[self.prefix_idx+1:self.suffix_idx])
+        normal_code = "\n".join(self.md_outs[self.prefix_idx + 1:self.suffix_idx])
         if self.code_text_handle is not None:
             return self.code_text_handle(normal_code)
         else:
@@ -278,7 +346,7 @@ class CodeMixNormalBlock:
         outs = []
         if self.suffix_idx <= self.prefix_idx:
             return "\n".join(self.md_outs)
-        outs.extend(self.md_outs[0:self.prefix_idx+1])
+        outs.extend(self.md_outs[0:self.prefix_idx + 1])
         outs.append(self.codeblock)
         outs.extend(self.md_outs[self.suffix_idx:])
 
@@ -317,8 +385,6 @@ class Book2ToMd:
         self.blockquoteCfg['italic']['size'] = self.blockquoteCfg['blockquote']['size']
         self.blockquoteCfg['inline-code']['size'] = self.blockquoteCfg['blockquote']['size']
 
-
-
     def check_size_and_font_by_config(self, f1, keys, size_diff=0.1):
         return check_size_and_font(self.bookCfg[keys], f1, size_diff)
 
@@ -334,8 +400,13 @@ class Book2ToMd:
 
     def append_outs_mixed_noraml_and_codeblock(self, cn_block: CodeMixNormalBlock, blk, lines, cline_start, cline_cnt,
                                                need_start=True, need_ends=True):
+        """
+        现象： 多于一个codeblock，存在将 同一行 mupdf解析为多行
+          所以生成文本时, 使用 is_merge_line=True进行合并多行为一行
+        """
         if lines == 1:
-            cn_block.append_outs("`" + get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=cline_cnt) + "`")
+            cn_block.append_outs(
+                "`" + get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=0, line_limit=cline_cnt) + "`")
             str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_cnt:], MdType.MIXED_NORMAL_CBLK)
             if str_out != '':
                 cn_block.append_outs(str_out)
@@ -346,10 +417,12 @@ class Book2ToMd:
 
             if need_start:
                 cn_block.set_header_prefix()
-            cn_block.append_outs(get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=cline_start, line_limit=cline_cnt))
+            cn_block.append_outs(get_block_texts(blk, span_spl=' ', line_spl='\n', start_line=cline_start,
+                                                 line_limit=cline_cnt, is_merge_line=True))
             if need_ends:
                 cn_block.set_end_suffix()
-            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_start + cline_cnt:], MdType.MIXED_NORMAL_CBLK)
+            str_out = self.get_normal_str_by_lines(self.bookCfg, lines[cline_start + cline_cnt:],
+                                                   MdType.MIXED_NORMAL_CBLK)
             if str_out != '':
                 cn_block.append_outs(str_out)
 
@@ -512,7 +585,7 @@ class Book2ToMd:
                     if flag == TYPE_FIGURE:
                         return get_lines_texts(lines) + "\n\n```\n\n\n\n\n```", 1
                     else:
-                        return get_lines_texts(lines) , 1
+                        return get_lines_texts(lines), 1
                 else:
                     x0, y0, x1, y1 = block['bbox']
                     next_blk = blocks[i + 1]
@@ -722,16 +795,6 @@ class Book2ToMd:
                 out_blocks.append(block)
         return out_blocks
 
-    def set_bbox_xy0(self, element, point):
-        x0, y0, x1, y1 = element['bbox']
-        x, y = point
-        element['bbox'] = x, y, x1, y1
-
-    def set_bbox_xy1(self, element, point):
-        x0, y0, x1, y1 = element['bbox']
-        x, y = point
-        element['bbox'] = x0, y0, x, y
-
     def split_block(self, blk):
         """
         现象：有的pdf其段落之间比较紧密, 仅仅依靠首行缩进区分，而mupdf将多个这样的段落识别为一个block
@@ -744,45 +807,54 @@ class Book2ToMd:
         if line_cnt < 5:
             return None
 
-        i = 0 # 第1、2行跳过
+        i = 0  # 第1、2行跳过
         init_block = {'bbox': (0, 0, 0, 0), 'lines': [], 'split': True}
         loop_block = copy.deepcopy(init_block)
         while i < line_cnt:
             cur_line = lines[i]
             x10, y10, x11, y11 = cur_line['bbox']
             if i == 0:
-                self.set_bbox_xy0(loop_block, (x10, y10))
+                set_bbox_xy0(loop_block, (x10, y10))
                 loop_block['lines'].append(cur_line)
                 i += 1
                 continue
-            pre_line = lines[i-1]
+            pre_line = lines[i - 1]
             x20, y20, x21, y21 = pre_line['bbox']
 
+            """
+            场景1:
+             xxxxx
+               xxxxxxxxxx
+             xxxxxxx
+             场景2：
+              xxxxxxxxx
+              xxxxxxxxx
+               xxxxx
+            """
             if i == line_cnt - 1:
-                if abs(x20 - x10) > 10:
-                    self.set_bbox_xy1(loop_block, (x21, y21))
+                if abs(x20 - x10) > 10 and x10 > x20:
+                    set_bbox_xy1(loop_block, (x21, y21))
                     new_blks.append(loop_block)
                     new_blks.append({'bbox': cur_line['bbox'], 'lines': [cur_line], 'split': True})
                 else:
                     loop_block['lines'].append(cur_line)
-                    self.set_bbox_xy1(loop_block, (x11, y11))
+                    set_bbox_xy1(loop_block, (x11, y11))
                     new_blks.append(loop_block)
                 i += 1
             else:
                 nxt_line = lines[i + 1]
                 x30, y30, x31, y31 = nxt_line['bbox']
                 if abs(x30 - x20) < 2 and abs(x20 - x10) > 10:
-                    self.set_bbox_xy1(loop_block, (x21, y21))
+                    set_bbox_xy1(loop_block, (x21, y21))
                     new_blks.append(loop_block)
                     loop_block = copy.deepcopy(init_block)
-                    self.set_bbox_xy0(loop_block, (x10, y10))
+                    set_bbox_xy0(loop_block, (x10, y10))
                     loop_block['lines'].append(cur_line)
                 else:
                     loop_block['lines'].append(cur_line)
                 i += 1
 
         return new_blks
-
 
     def configOfBlockQueto(self):
         if 'blockquote-type' not in self.bookCfg.keys():
@@ -813,7 +885,6 @@ class Book2ToMd:
                 table_md_str = self.tableListList2Md(tb_ll, tb.row_count, tb.col_count)
                 blocks = self.filter_blocks_by_bbox(blocks, tb.bbox)
                 md_elements.append(MdElement(table_md_str, tb.bbox))
-
 
             i = 0
             while i < len(blocks):
@@ -881,7 +952,7 @@ class Book2ToMd:
                 if 'split' not in blk.keys():
                     split_blks = self.split_block(blk)
                     if split_blks is not None:
-                        blocks = blocks[0:i] + blocks[i+1:]
+                        blocks = blocks[0:i] + blocks[i + 1:]
                         split_blks.reverse()
                         for sblk in split_blks:
                             blocks.insert(i, sblk)
@@ -907,11 +978,13 @@ book1ConfigDc = {
     'footer_block_cnt': 0,  # 页脚 块数 跳过
     'path': r"H:\pdf\CS计算机\网络\TCPIP Illustrated, Volume 1 The Protocols by Kevin R. Fall, W. Richard Stevens (z-lib.org).pdf",
 
-    'normal': {'size': 10.0, 'flags': 4, 'font': ['Palatino-Roman', 'Courier-Oblique', 'Palatino-Bold', 'Palatino-BoldItalic']},  # 正文 格式
+    'normal': {'size': 10.0, 'flags': 4,
+               'font': ['Palatino-Roman', 'Courier-Oblique', 'Palatino-Bold', 'Palatino-BoldItalic']},  # 正文 格式
     'italic': {'size': 10.0, 'flags': 6, 'font': 'Palatino-Italic'},  # 正文 斜体字格式 ==> md加粗 *xxx*
     'inline-code': {'size': 10.0, 'flags': 4, 'font': 'Courier'},  # 正文 内联代码块  ==>  `xxx`
 
-    'codeblock': {'size': 8.0, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic']},  # 代码块
+    'codeblock': {'size': 8.0, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic']},
+    # 代码块
     'language': "",  # 代码块的默认编程语言
 
     'title-5': {'size': 10.0, 'flags': 20, 'font': 'Helvetica-Oblique'},
@@ -927,7 +1000,6 @@ book1ConfigDc = {
     'figure': {},
 }
 
-
 book1ConfigDc2 = {
     'header_block_cnt': 1,  # 页眉 块数 跳过
     'footer_block_cnt': 0,  # 页脚 块数 跳过
@@ -935,10 +1007,12 @@ book1ConfigDc2 = {
 
     'normal': {'size': [11.14, 10.03], 'flags': 4, 'font': ['Palatino-Roman']},  # 正文 格式
     'italic': {'size': [11.14, 10.03, 7.8], 'flags': 6, 'font': ['Palatino-Italic', 'Palatino-Bold', 'Helvetica-Bold',
-                                                                 'Courier-Bold', 'Courier-Oblique']},  # 正文 斜体字格式 ==> md加粗 *xxx*
+                                                                 'Courier-Bold', 'Courier-Oblique']},
+    # 正文 斜体字格式 ==> md加粗 *xxx*
     'inline-code': {'size': [11.14], 'flags': 4, 'font': 'Courier'},  # 正文 内联代码块  ==>  `xxx`
 
-    'codeblock': {'size': 9.08, 'flags': 20, 'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic', 'Palatino-Roman']},  # 代码块
+    'codeblock': {'size': 9.08, 'flags': 20,
+                  'font': ['Courier-Bold', 'Courier', 'Courier-Oblique', 'Palatino-Italic', 'Palatino-Roman']},  # 代码块
     'language': "c",  # 代码块的默认编程语言
     'codeHandle': "code_block_text_handle_remove_line_number",  # 代码块文本处理函数
 
@@ -947,8 +1021,9 @@ book1ConfigDc2 = {
     'title-3': {'size': 13.37, 'flags': 20, 'font': ['Helvetica-Bold', 'Courier-Bold']},  # md 3级标题
     'chapter': {},  # 章节名 ===> md 2级标题(不支持)
 
-    'blockquote': {'size': [8.9, 8.91], 'flags': 4, 'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic']},  # md的 > xxxx 的块引用格式
-    'blockquote-type': "",   # 默认关键词触发
+    'blockquote': {'size': [8.9, 8.91], 'flags': 4, 'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic']},
+    # md的 > xxxx 的块引用格式
+    'blockquote-type': "",  # 默认关键词触发
 
     # 第一个为{}, 则要填后面2个, 否则2个格式相同 都用第一个
     'table_or_figure': {'size': 8.91, 'flags': 20, 'font': 'Palatino-Bold'},
@@ -962,10 +1037,11 @@ book1ConfigDc3 = {
     'path': r"F:\pdf\CS计算机\操作系统\Operating Systems Three Easy Pieces by Remzi H. Arpaci-Dusseau, Andrea C. Arpaci-Dusseau (z-lib.org).pdf",
 
     'normal': [
-            {'size': [8.96, 7.17], 'flags': 4, 'font': ['NimbusSanL-Regu', 'URWPalladioL-Roma', 'CMMI9', 'CMSY9', 'CMR9']},
-            {'size': 5.9775800704956055, 'flags': 4, 'font': ['CMMI6', 'CMR6']}
-        ],  # 正文 格式
-    'italic': {'size': [8.96], 'flags': 6, 'font': ['URWPalladioL-Bold', 'NimbusMonL-Bold']},  # 正文 斜体字格式 ==> md加粗 **xxx**
+        {'size': [8.96, 7.17], 'flags': 4, 'font': ['NimbusSanL-Regu', 'URWPalladioL-Roma', 'CMMI9', 'CMSY9', 'CMR9']},
+        {'size': 5.9775800704956055, 'flags': 4, 'font': ['CMMI6', 'CMR6']}
+    ],  # 正文 格式
+    'italic': {'size': [8.96], 'flags': 6, 'font': ['URWPalladioL-Bold', 'NimbusMonL-Bold']},
+    # 正文 斜体字格式 ==> md加粗 **xxx**
     'inline-code': {'size': [8.96], 'flags': 4, 'font': 'NimbusMonL-Regu'},  # 正文 内联代码块  ==>  `xxx`
     'real-italic': {'size': 8.96638011932373, 'flags': 4, 'font': 'URWPalladioL-Ital'},  # 正文: 期望的斜体字格式 ===> md斜体字 *xxx*
 
@@ -980,9 +1056,10 @@ book1ConfigDc3 = {
     'title-3': {'size': 10.9, 'flags': 20, 'font': ['URWPalladioL-Roma']},  # md 3级标题
     'chapter': {},  # 章节名 ===> md 2级标题(不支持)
 
-    'blockquote': {'size': [8.96, 8.91, 7.173, 7.97], 'flags': 4, 'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic',
-                                                                   'URWPalladioL-Roma']},  # md的 > xxxx 的块引用格式
-    'blockquote-type': "book3",   # 不存在则, 默认关键词触发; 否则空字符表示 font触发，或者其他特定触发（字体无法判断）
+    'blockquote': {'size': [8.96, 8.91, 7.173, 7.97], 'flags': 4,
+                   'font': ['Palatino-Roman', 'Courier', 'Palatino-Italic',
+                            'URWPalladioL-Roma']},  # md的 > xxxx 的块引用格式
+    'blockquote-type': "book3",  # 不存在则, 默认关键词触发; 否则空字符表示 font触发，或者其他特定触发（字体无法判断）
 
     # 第一个为{}, 则要填后面2个, 否则2个格式相同 都用第一个
     'table_or_figure': {'size': 8.91, 'flags': 20, 'font': 'Palatino-Bold'},
@@ -990,10 +1067,11 @@ book1ConfigDc3 = {
     'figure': {},
 }
 
-
 # ALL_PROXY=socks5://127.0.0.1:10808 git push origin
+g_main = 0
+
 if __name__ == "__main__":
-    # b1 = Book2ToMd(book1ConfigDc2)
-    # b1.pages_to_md(158, 1)
-    b1 = Book2ToMd(book1ConfigDc3)
-    b1.pages_to_md(450, 1)
+    b1 = Book2ToMd(book1ConfigDc2)
+    b1.pages_to_md(167, 1)
+    # b1 = Book2ToMd(book1ConfigDc3)
+    # b1.pages_to_md(576, 2)
